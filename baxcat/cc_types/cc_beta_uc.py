@@ -145,7 +145,7 @@ class cc_beta_uc(object):
         lp += (β-1.0)*sum_minus_log_x
         
         assert( not numpy.isnan(lp) )
-        return lpassert( not numpy.isnan(lp) )
+        return lp
 
     @staticmethod
     def draw_beta_params(λ, α, β):
