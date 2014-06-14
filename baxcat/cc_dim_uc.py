@@ -21,6 +21,7 @@ class cc_dim_uc(cc_dim):
         documentation for each type for details
         """
         super(cc_dim_uc, self).__init__(X, cc_datatype_class, index, Z=None, n_grid=30, distargs=None)
+        self.mode = 'uncollapsed'
         self.params = dict()
 
     def singleton_predictive_logp(self,n):

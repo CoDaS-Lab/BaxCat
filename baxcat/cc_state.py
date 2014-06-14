@@ -1,6 +1,7 @@
+import copy
 import numpy
-import random
 import pylab
+import random
 from math import log
 from math import exp
 from scipy.stats import gamma
@@ -93,12 +94,6 @@ class cc_state(object):
             random.seed(seed)
             numpy.random.seed(seed)
 
-        self.__column_transition_kernels = [
-            self.__transition_columns_kernel_0,     # orignal Gibbs (no gaps)
-            self.__transition_columns_kernel_1,     # Metropolis-Hastings
-            self.__transition_columns_kernel_2,     # Gibbs with aux parameters
-        ]
-        
         self.n_rows = len(X[0])
         self.n_cols = len(X)
         self.n_grid = n_grid
@@ -229,16 +224,14 @@ class cc_state(object):
         self.dims.append(dim)
         self.Zv = numpy.append(self.Zv, -1)
         
-        if ct_kernel == 2:
-            self.__column_transition_kernels[ct_kernel](m=m, append=True)
-        elif ct_kernel == 0:
-            self.__column_transition_kernels[ct_kernel](append=True)
+        if _is_uncollapsed[cctype]:
+            column_transition_kernel_collapsed(m=m, append=True)
         else:
-            raise ValueError("invalid ct_kernel (%s) for append_dim." % (str(ct_kernel)))
+            column_transition_kernel_uncollapsed(m=m, append=True)
 
         self.__check_partitions()
 
-    def transition(self, N=1, kernel_list=None, ct_kernel=0, which_rows=None, which_cols=None, do_plot=False):
+    def transition(self, N=1, kernel_list=None, ct_kernel=0, which_rows=None, which_cols=None, m=1, do_plot=False):
         """
         Do transitions.
 
@@ -256,7 +249,7 @@ class cc_state(object):
         """
 
         kernel_dict = {
-            'column_z'      : lambda : self.__transition_columns(which_cols,ct_kernel),
+            'column_z'      : lambda : self.__transition_columns(which_cols,ct_kernel,m=m),
             'state_alpha'   : lambda : self.__transition_state_alpha(),
             'row_z'         : lambda : self.__transition_rows(which_rows),
             'column_hypers' : lambda : self.__transition_column_hypers(which_rows),
@@ -302,249 +295,187 @@ class cc_state(object):
         for dim in self.dims:
             dim.update_prior_grids()
 
-    def __transition_columns(self, which_cols=None, ct_kernel=0):
+    def __transition_columns(self, which_cols=None, ct_kernel=0, m=3):
         """Transition column assignment to views"""
-        column_transition_kernel = self.__column_transition_kernels[ct_kernel]
-        column_transition_kernel(which_cols=None)
 
-    def __transition_columns_kernel_0(self, which_cols=None, append=False):
-        """ 
-        column assignment transition kernel 0: Gibbs
-        """
+        if which_cols is None:
+            which_cols = [i for i in range(self.n_cols)]
+
+        random.shuffle(which_cols)
+
+        for col in which_cols:
+            if self.dims[col].mode == 'collapsed':
+                self.__transition_columns_kernel_collapsed(col, m=m, append=False)
+            elif self.dims[col].mode == 'uncollapsed':
+                self.__transition_columns_kernel_uncollapsed(col, m=m, append=False)
+            else:
+                raise ValueError('unsupported dim.mode for column %i: %s' % (col, self.dims[col].mode))
+
+
+
+    def __transition_columns_kernel_collapsed(self, col, m=3, append=False):
+        """Gibbs with auxiliary parameters for collapsed data types"""
+
         if append:
-            which_cols = [self.n_cols-1]
+            col = self.n_cols-1
 
-        if which_cols is None:
-            which_cols = [i for i in range(self.n_cols)]
+        # get start view, v_a, and check whether a singleton
+        v_a = self.Zv[col]
 
-        random.shuffle(which_cols)
+        if append:
+            is_singleton = False
+            pv = list(self.Nv)
+        else:
+            is_singleton = (self.Nv[v_a] == 1)
 
-        for col in which_cols:
-
-            # get starting view and check whether it is a singleton
-            v_a = self.Zv[col] 
-
-            if append:
-                is_singleton = False
-                pv = list(self.Nv)
-            else:
-                is_singleton = (self.Nv[v_a] == 1)
-
-                pv = list(self.Nv)
-                # remove value from CRP
-                if is_singleton:
-                    # if v_a is a singleton, do not consider move to new singleton view
-                    pv[v_a] = self.alpha
-                else:
-                    pv[v_a] -= 1
-                    # must consider singleton
-                    pv.append(self.alpha)
-
-            # take log of all values (no need to worry about denominator)
-            pv = numpy.log(numpy.array(pv))
-
-            ps = []
-            dim = self.dims[col]
-            for v in range(self.V):
-                # Get the probability of the data column under each view's assignment
-                dim.reassign(self.views[v].Z)
-                p_v = dim.full_marginal_logp()+pv[v]
-                ps.append(p_v)
-
-            # If v_a is not a singleton propose one (drawn from the prior)
-            if not is_singleton:
-                proposal_view = cc_view([dim], n_grid=self.n_grid)
-                dim.reassign(proposal_view.Z)
-                p_v = dim.full_marginal_logp()+pv[-1]
-                ps.append(p_v)
-
-            # draw a new view
-            v_b = utils.log_pflip(ps)
-
-            if append:
-                self.__append_new_dim_to_view(dim, v_b, proposal_view)
-                continue
-
-            # clean up
-            if v_b != v_a:
-                if is_singleton:
-                    self.__destroy_singleton_view(dim, v_a, v_b)
-                elif v_b == self.V:
-                    self.__create_singleton_view(dim, v_a, proposal_view)
-                else:
-                    self.__move_dim_to_view(dim, v_a, v_b)
-            else:
-                self.dims[col].reassign(self.views[v_a].Z)
-
-            # self.__check_partitions()
-
-    def __transition_columns_kernel_1(self, which_cols=None):
-        """column assignment transition kernel 1: Metropolis Birth-Death process"""
-
-        if which_cols is None:
-            which_cols = [i for i in range(self.n_cols)]
-
-        random.shuffle(which_cols)
-
-        for col in which_cols:
-            
-            # this dim
-            dim = self.dims[col]
-
-            # get start view, v_a, and check whether a singleton
-            v_a = self.Zv[col] 
-
-            # get CRP probability of column in current view
+            pv = list(self.Nv)
+            # Get crp probabilities under each view. remove from current view.
+            # If v_a is a singleton, do not consider move to new singleton view.
             if is_singleton:
-                pv = log(float(self.alpha))
+                pv[v_a] = self.alpha
             else:
-                pv = log(float(self.Nv[v_a]-1))
+                pv[v_a] -= 1
 
-            # log p for original assignment
-            p_v_a = dim.full_marginal_logp()+pv
+        # take the log
+        pv = numpy.log(numpy.array(pv))
 
+        ps = []
+        # calculate probability under each view's assignment
+        dim = self.dims[col]
 
-            # Metropolis move on birth-death. Decide whether to propose new or to shift.
-            p_new_propose_new_view = 0.5
-            create_new = random.random() < p_new_propose_new_view
+        for v in range(self.V):
+            dim.reassign(self.views[v].Z)
+            p_v = dim.full_marginal_logp()+pv[v]
+            ps.append(p_v)
 
-            # begin calculating transition probability (not always symmetric)
-            p_a_to_b = log(p_new_propose_new_view)  # P(v_a -> v_b)
-            p_b_to_a = log(p_new_propose_new_view)  # P(v_b -> v_a)
-
-            if create_new:
-                # Propose new view
-                v_b = self.V
+        # if not a singleton, propose m auxiliary parameters (views)
+        if not is_singleton:
+            # crp probability of singleton, split m times.
+            log_aux = log(self.alpha/float(m))
+            proposal_views = []
+            for  _ in range(m):
+                # propose (from prior) and calculate probability under each view
                 proposal_view = cc_view([dim], n_grid=self.n_grid)
-
-                # calculate probability under new view
+                proposal_views.append(proposal_view)
                 dim.reassign(proposal_view.Z)
-                p_v_b = dim.full_marginal_logp()+log(float(self.alpha))
-                
-                # If v_a is not a singleton then the proposals probabilities will be 
-                # different because a view is created if v_a assigned to v_b.
-                # v_a->v_b happens if create_new: P(v_a->v_b) = .5*1
-                # v_b->v_a happens if not create_new and v_a selected: P(v_b->v_a) = .5*1/(V+1)
-                if not is_singleton:
-                    p_b_to_a += log( 1.0/(self.V+1) )
-
-                # MH jump
-                if log(random.random()) < (p_v_b-p_v_a + p_b_to_a - p_a_to_b):
-                    if is_singleton:
-                        self.__swap_singleton_views(dim, v_a, proposal_view)
-                    else:
-                        self.__create_singleton_view(dim, v_a, proposal_view)
-                else:
-                    self.dims[col].reassign(self.views[v_a].Z)
-            else:
-                # choose a random view, v_b, to jump to
-                v_b = random.randrange(self.V)
-
-                # we only need to do something if v_a != v_b
-                if v_b != v_a:
-                    # calculate the probability under the new view
-                    dim.reassign(self.views[v_b].Z)
-                    p_v_b = dim.full_marginal_logp()+log(float(self.Nv[v_b]))
-
-                    # if v_a is a singleton, the proposal probabilities are not identical
-                    # because v_b would be moving to a singleton
-                    # v_a->v_b if not create_new and v_b selected P(v_a->v_b) = .5*1/V
-                    # v_b->v_a if create_new P(v_b->v_a) = .5*1
-                    if is_singleton:
-                        p_a_to_b += log(1.0/self.V)
-
-                    # MH jump
-                    if log(random.random()) < (p_v_b-p_v_a + p_b_to_a - p_a_to_b):
-                        if is_singleton:
-                            self.__destroy_singleton_view(dim, v_a, v_b)
-                        else:
-                            self.__move_dim_to_view(dim, v_a, v_b)
-                    else:
-                        self.dims[col].reassign(self.views[v_a].Z)
-
-            # self.__check_partitions()
-
-    def __transition_columns_kernel_2(self, which_cols=None, m=3, append=False):
-        """ column assignment transition kernel 2: Gibbs with auxiliary parameters"""
-
-        if append:
-            which_cols = [self.n_cols-1]
-
-        if which_cols is None:
-            which_cols = [i for i in range(self.n_cols)]
-
-        random.shuffle(which_cols)
-
-        for col in which_cols:
-            # get start view, v_a, and check whether a singleton
-            v_a = self.Zv[col]
-
-            if append:
-                is_singleton = False
-                pv = list(self.Nv)
-            else:
-                is_singleton = (self.Nv[v_a] == 1)
-
-                pv = list(self.Nv)
-                # Get crp probabilities under each view. remove from current view.
-                # If v_a is a singleton, do not consider move to new singleton view.
-                if is_singleton:
-                    pv[v_a] = self.alpha
-                else:
-                    pv[v_a] -= 1
-
-            # take the log
-            pv = numpy.log(numpy.array(pv))
-
-            ps = []
-            # calculate probability under each view's assignment
-            dim = self.dims[col]
-            for v in range(self.V):
-                dim.reassign(self.views[v].Z)
-                p_v = dim.full_marginal_logp()+pv[v]
+                p_v = dim.full_marginal_logp()+log_aux
                 ps.append(p_v)
 
-            # if not a singleton, propose m auxiliary parameters (views)
-            if not is_singleton:
-                # crp probability of singleton, split m times.
-                log_aux = log(self.alpha/float(m))
-                proposal_views = []
-                for  _ in range(m):
-                    # propose (from prior) and calculate probability under each view
-                    proposal_view = cc_view([dim], n_grid=self.n_grid)
-                    proposal_views.append(proposal_view)
-                    dim.reassign(proposal_view.Z)
-                    p_v = dim.full_marginal_logp()+log_aux
-                    ps.append(p_v)
+        # draw a view
+        v_b = utils.log_pflip(ps)
 
-            # draw a view
-            v_b = utils.log_pflip(ps)
+        if append:
+            if v_b >= self.V:
+                index = v_b-self.V
+                assert( index >= 0 and index < m)
+                proposal_view = proposal_views[index]
+            self.__append_new_dim_to_view(dim, v_b, proposal_view)
+            return
 
-            if append:
-                if v_b >= self.V:
-                    index = v_b-self.V
-                    assert( index >= 0 and index < m)
-                    proposal_view = proposal_views[index]
-                self.__append_new_dim_to_view(dim, v_b, proposal_view)
-                continue
-
-            # clean up
-            if v_b != v_a:
-                if is_singleton:
-                    assert( v_b < self.V )
-                    self.__destroy_singleton_view(dim, v_a, v_b)
-                elif v_b >= self.V:
-                    index = v_b-self.V
-                    assert( index >= 0 and index < m)
-                    proposal_view = proposal_views[index]
-                    self.__create_singleton_view(dim, v_a, proposal_view)
-                else:
-                    self.__move_dim_to_view(dim, v_a, v_b)
+        # clean up
+        if v_b != v_a:
+            if is_singleton:
+                assert( v_b < self.V )
+                self.__destroy_singleton_view(dim, v_a, v_b)
+            elif v_b >= self.V:
+                index = v_b-self.V
+                assert( index >= 0 and index < m)
+                proposal_view = proposal_views[index]
+                self.__create_singleton_view(dim, v_a, proposal_view)
             else:
-                self.dims[col].reassign(self.views[v_a].Z)
+                self.__move_dim_to_view(dim, v_a, v_b)
+        else:
+            self.dims[col].reassign(self.views[v_a].Z)
 
-            # for debugging
-            self.__check_partitions()
+        # self.__check_partitions()
+
+    def __transition_columns_kernel_uncollapsed(self, col, m=3, append=False):
+        """Gibbs with auxiliary parameters for uncollapsed data types"""
+
+        if append:
+            col = self.n_cols-1
+
+        # get start view, v_a, and check whether a singleton
+        v_a = self.Zv[col]
+
+        if append:
+            is_singleton = False
+            pv = list(self.Nv)
+        else:
+            is_singleton = (self.Nv[v_a] == 1)
+
+            pv = list(self.Nv)
+            # Get crp probabilities under each view. remove from current view.
+            # If v_a is a singleton, do not consider move to new singleton view.
+            if is_singleton:
+                pv[v_a] = self.alpha
+            else:
+                pv[v_a] -= 1
+
+        # take the log
+        pv = numpy.log(numpy.array(pv))
+
+        ps = []
+        # calculate probability under each view's assignment
+        dim = self.dims[col]
+
+        dim_holder = []
+
+        for v in range(self.V):
+            if v == v_a:
+                dim_holder.append(dim)
+            else:
+                dim_holder.append(copy.deepcopy(dim))
+                dim_holder[-1].reassign(self.views[v].Z)
+
+            p_v = dim_holder[-1].full_marginal_logp()+pv[v]
+            ps.append(p_v)
+
+        # if not a singleton, propose m auxiliary parameters (views)
+        if not is_singleton:
+            # crp probability of singleton, split m times.
+            log_aux = log(self.alpha/float(m))
+            proposal_views = []
+            for  _ in range(m):
+                # propose (from prior) and calculate probability under each view
+                dim_holder.append(copy.deepcopy(dim))
+
+                proposal_view = cc_view([dim_holder[-1]], n_grid=self.n_grid)
+                proposal_views.append(proposal_view)
+                dim_holder[-1].reassign(proposal_view.Z)
+
+                p_v = dim_holder[-1].full_marginal_logp()+log_aux
+                ps.append(p_v)
+
+
+        # draw a view
+        v_b = utils.log_pflip(ps)
+
+        newdim = dim_holder[v_b]
+        self.dims[dim.index] = newdim
+
+        if append:
+            if v_b >= self.V:
+                index = v_b-self.V
+                assert( index >= 0 and index < m)
+                proposal_view = proposal_views[index]
+            self.__append_new_dim_to_view(newdim, v_b, proposal_view, is_uncollapsed=True)
+            return
+
+        # clean up
+        if v_b != v_a:
+            if is_singleton:
+                assert( v_b < self.V )
+                self.__destroy_singleton_view(newdim, v_a, v_b, is_uncollapsed=True)
+            elif v_b >= self.V:
+                index = v_b-self.V
+                assert( index >= 0 and index < m)
+                proposal_view = proposal_views[index]
+                self.__create_singleton_view(newdim, v_a, proposal_view, is_uncollapsed=True)
+            else:
+                self.__move_dim_to_view(newdim, v_a, v_b, is_uncollapsed=True)
+        
+        # self.__check_partitions()
 
     def __transition_rows(self, which_rows=None):
         # move rows to new cluster
@@ -573,38 +504,35 @@ class cc_state(object):
         index = utils.log_pflip(logps)
         self.alpha = self.alpha_grid[index]
 
-    def __destroy_singleton_view(self, dim, to_destroy, move_to):
+    def __destroy_singleton_view(self, dim, to_destroy, move_to, is_uncollapsed=False):
         self.Zv[dim.index] = move_to
         self.views[to_destroy].release_dim(dim.index)   
         zminus = numpy.nonzero(self.Zv>to_destroy)
         self.Zv[zminus] -= 1
-        self.views[move_to].assimilate_dim(dim)
+        self.views[move_to].assimilate_dim(dim, is_uncollapsed=is_uncollapsed)
         self.Nv[move_to] += 1
         del self.Nv[to_destroy]
         del self.views[to_destroy]
         self.V -= 1
 
-    def __swap_singleton_views(self, dim, view_index, proposal_view):
-        self.views[view_index] = proposal_view
-        dim.reassign(proposal_view.Z)
-
-    def __create_singleton_view(self, dim, current_view_index, proposal_view):
+    def __create_singleton_view(self, dim, current_view_index, proposal_view, is_uncollapsed=False):
         self.Zv[dim.index] = self.V
-        dim.reassign(proposal_view.Z)
+        if not is_uncollapsed:
+            dim.reassign(proposal_view.Z)
         self.views[current_view_index].release_dim(dim.index)
         self.Nv[current_view_index] -= 1
         self.Nv.append(1)
         self.views.append(proposal_view)
         self.V += 1
 
-    def __move_dim_to_view(self, dim, move_from, move_to):
+    def __move_dim_to_view(self, dim, move_from, move_to, is_uncollapsed=False):
         self.Zv[dim.index] = move_to
         self.views[move_from].release_dim(dim.index)
         self.Nv[move_from] -= 1
-        self.views[move_to].assimilate_dim(dim)
+        self.views[move_to].assimilate_dim(dim, is_uncollapsed=is_uncollapsed)
         self.Nv[move_to] += 1
 
-    def __append_new_dim_to_view(self, dim, append_to, proposal_view):
+    def __append_new_dim_to_view(self, dim, append_to, proposal_view, is_uncollapsed=False):
         self.Zv[dim.index] = append_to
         if append_to == self.V:
             self.Nv.append(1)
@@ -612,7 +540,7 @@ class cc_state(object):
             self.views.append(proposal_view)
         else:
             self.Nv[append_to] += 1
-            self.views[append_to].assimilate_dim(dim)
+            self.views[append_to].assimilate_dim(dim, is_uncollapsed=is_uncollapsed)
 
         self.__check_partitions()
 

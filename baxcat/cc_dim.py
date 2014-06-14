@@ -34,6 +34,7 @@ class cc_dim(object):
         self.hypers_grids = hypers_grids
         self.hypers = hypers
         self.distargs = distargs
+        self.mode = 'collapsed'
 
         if Z is None:
             self.clusters = []

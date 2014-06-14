@@ -11,7 +11,7 @@ import pdb
 # in real time
 
 # set up the data generation
-n_rows = 300
+n_rows = 200
 view_weights = numpy.ones(1)
 cluster_weights = [ numpy.array([.33, .33, .34]) ]
 cctypes = ['beta_uc', 'normal','normal_uc','poisson','multinomial','vonmises','vonmises_uc','binomial', 'lognormal']

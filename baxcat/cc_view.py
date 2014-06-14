@@ -225,9 +225,10 @@ class cc_view(object):
         for dim in self.dims.values():
             dim.move_to_cluster(row, move_from, move_to)
 
-    def assimilate_dim(self, new_dim):
+    def assimilate_dim(self, new_dim, is_uncollapsed=True):
         # resistance is futile
-        new_dim.reassign(self.Z)
+        if not is_uncollapsed:
+            new_dim.reassign(self.Z)
         self.dims[new_dim.index] = new_dim
 
     def release_dim(self, dim_index):
