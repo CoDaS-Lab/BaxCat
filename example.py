@@ -1,10 +1,9 @@
 from baxcat.utils import cc_test_utils as tu
 from baxcat import cc_view 
 from baxcat import cc_state
-from baxcat import Engine
+from baxcat import Engine 
 import pylab
 import numpy
-
 import pdb
 
 # This script generates a column of every data type and plots inference 
@@ -13,7 +12,7 @@ import pdb
 # set up the data generation
 n_rows = 200
 view_weights = numpy.ones(1)
-cluster_weights = [ numpy.array([.33, .33, .34]) ]
+cluster_weights = [numpy.array([.33, .33, .34])]
 cctypes = ['beta_uc', 'normal','normal_uc','poisson','multinomial','vonmises','vonmises_uc','binomial', 'lognormal']
 separation = [.95]*9
 distargs = [None, None, None, None, {"K":5}, None, None, None, None]
